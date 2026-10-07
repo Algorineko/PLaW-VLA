@@ -448,6 +448,14 @@ def _prepare_model_config_for_conversion(train_config: _config.TrainConfig):
 
     if overrides:
         model_config = _dc.replace(model_config, **overrides)
+    if model_config.enable_world_model is False and train_config.training_stage == "wm_alignment":
+        # The wm_alignment training stage requires the world-model branch, so a
+        # stage1 config cannot be built with the world model disabled. The
+        # converter only materializes the pi05 action stack; build it with the
+        # plain post-training stage instead. The saved config.json still records
+        # the original training stage for reference. (training_stage is an
+        # injected attribute, not a dataclass field, so set it directly.)
+        object.__setattr__(model_config, "training_stage", "post_training")
 
     if not hasattr(model_config, "training_stage"):
         object.__setattr__(model_config, "training_stage", train_config.training_stage)
