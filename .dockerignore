@@ -1,3 +1,10 @@
+.git
 .venv
+**/.venv
 checkpoints
 data
+wandb
+logs
+results
+third_party
+*.tar.gz

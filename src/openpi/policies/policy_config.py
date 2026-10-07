@@ -42,7 +42,7 @@ def create_trained_policy(
 
     Note:
         The function automatically detects whether the model is PyTorch-based by checking for the
-        presence of "model.safensors" in the checkpoint directory.
+        presence of "model.safetensors" in the checkpoint directory.
     """
     repack_transforms = repack_transforms or transforms.Group()
     checkpoint_dir = download.maybe_download(str(checkpoint_dir))

@@ -23,7 +23,7 @@ ENV UV_LINK_MODE=copy
 ENV UV_PROJECT_ENVIRONMENT=/.venv
 
 # Install the project's dependencies using the lockfile and settings
-RUN uv venv --python 3.11.9 $UV_PROJECT_ENVIRONMENT
+RUN uv venv --python 3.12 $UV_PROJECT_ENVIRONMENT
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=uv.lock,target=uv.lock \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \

@@ -24,8 +24,10 @@ dependencies = [
     "openpi-client",
     "orbax-checkpoint==0.11.13",
     "pillow>=11.0.0",
+    "pydantic>=2.0.0",
     "sentencepiece>=0.2.0",
     "torch==2.7.1",
+    "websockets>=11.0",
     "tqdm-loggable>=0.2",
     "typing-extensions>=4.12.2",
     "tyro>=0.9.5",
@@ -56,6 +58,12 @@ dev = [
 [tool.uv]
 no-build-package = ["av"]
 override-dependencies = ["ml-dtypes==0.4.1", "tensorstore==0.1.74", "av>=15.0.0"]
+
+# Resolve against the default PyPI index so the lockfile is portable and does
+# not pin contributors to a regional mirror.
+[[tool.uv.index]]
+url = "https://pypi.org/simple"
+default = true
 
 [tool.uv.sources]
 openpi-client = { workspace = true }
