@@ -17,14 +17,21 @@ docker compose -f examples/simple_client/compose.yml up --build
 
 ## Without Docker
 
+The server only serves LIBERO policies (`--env LIBERO` is the only server-side
+mode). The client's `--env` flag selects a random-observation generator
+(`DROID`, `ALOHA_SIM`, `LIBERO`) used to exercise the server without a real
+robot or simulator.
+
 Terminal window 1:
 
 ```bash
-uv run examples/simple_client/main.py --env DROID
+uv run examples/simple_client/main.py --env LIBERO
 ```
 
 Terminal window 2:
 
 ```bash
-uv run scripts/serve_policy.py --env DROID
+uv run scripts/serve_policy.py --env LIBERO policy:checkpoint \
+  --policy.config=<config_name> \
+  --policy.dir=checkpoints/<config_name>/<exp_name>/<step>
 ```

@@ -7,8 +7,14 @@ The written keys match ``LeRobotLiberoDataConfig`` defaults:
 - ``observation.state`` (8D raw end-effector state)
 - ``action`` (7D signed gripper command)
 
-That is not the released ``libero_v3_eef`` layout. Point a new ``TrainConfig`` at
-the output directory and set ``dataset_action_gripper_format="signed_command"``.
+That is not the released ``libero_v3_eef`` layout. The released dataset used by
+the three shipped stage configs (`stage1_world_model_pretraining`,
+`stage2_pretraining`, `stage3_finetuning_libero`) is
+`RainyBot/libero_v3_eef` (``observation.images.head`` /
+``observation.images.wrist_right``, 8D EEF delta actions with
+``absolute_physical_width`` gripper). This script is only a template for
+converting *new* raw LIBERO data: point a new ``TrainConfig`` at the output
+directory and set ``dataset_action_gripper_format="signed_command"``.
 
 Usage:
 uv run examples/libero/convert_libero_data_to_lerobot.py --data-dir /path/to/your/data

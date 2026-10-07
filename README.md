@@ -1,7 +1,7 @@
 <h1 align="center">PLaW-VLA: Predictive Latent World Modeling for Vision-Language-Action Policies</h1>
 
 <p align="center">
-  <a href="https://arxiv.org/abs/XXXX.XXXXX"><img src="https://img.shields.io/badge/arXiv-XXXX.XXXXX-b31b1b"></a>
+  <!-- TODO: add the arXiv badge once the paper ID is public. -->
   <a href="https://rainyrobo.github.io/PLaW-VLA"><img src="https://img.shields.io/badge/Project-Website-blue"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache--2.0-green"></a>
 </p>
@@ -32,6 +32,12 @@ bash scripts/install_transformers_patch.sh
 ```
 
 `uv` installs the required Python version and CUDA-enabled packages. An NVIDIA GPU and a compatible driver are required. Run the last command again after every subsequent `uv sync`.
+
+> **Submodules:** of the five registered submodules, only `third_party/libero` is
+> required (for LIBERO evaluation). `third_party/aloha`, `third_party/robotwin`,
+> `third_party/libero-plus`, and `third_party/vjepa2` are optional references and
+> are not imported by any code path, so you can skip them with
+> `git submodule update --init third_party/libero` to save clone time.
 
 ## Downloading Assets
 
