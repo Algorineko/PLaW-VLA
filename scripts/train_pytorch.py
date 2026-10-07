@@ -25,6 +25,7 @@ Multi-Node Training:
 
 """
 
+import contextlib
 import dataclasses
 import gc
 import logging
@@ -226,6 +227,32 @@ def get_model_parameters(model):
     )
 
 
+def _evict_checkpoint_page_cache(ckpt_dir) -> None:
+    """Drop the page cache of freshly written checkpoint files.
+
+    DCU addition: on this box a ~8GB model + ~14GB optimizer write lands in
+    the page cache, which counts against the 32GiB host cgroup memory wall,
+    and the kernel does not proactively evict it — the OOM killer becomes the
+    eviction mechanism, minutes after the save returns. gc + sync + fadvise
+    pushes it out deterministically.
+    """
+    import posix as _posix
+
+    gc.collect()
+    os.sync()
+    for path in sorted(ckpt_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        try:
+            fd = os.open(path, os.O_RDONLY)
+            try:
+                _posix.posix_fadvise(fd, 0, 0, _posix.POSIX_FADV_DONTNEED)
+            finally:
+                os.close(fd)
+        except OSError as exc:  # best-effort; never fail training over cache hints
+            logging.debug("fadvise failed for %s: %s", path, exc)
+
+
 def save_checkpoint(model, optimizer, global_step, config, is_main, data_loader):
     """Save a checkpoint with model state, optimizer state, and metadata."""
     # Only save if it's time to save or if it's the final step. Every rank must
@@ -234,48 +261,69 @@ def save_checkpoint(model, optimizer, global_step, config, is_main, data_loader)
     should_save = (global_step % config.save_interval == 0 and global_step > 0) or (
         global_step == config.num_train_steps - 1
     )
+    # DCU addition: optionally serialize saves across concurrent jobs on the
+    # same host — their transient page-cache spikes share one 32GiB cgroup.
+    lock_fd = None
     if is_main and should_save:
-        # Create temporary directory for atomic checkpoint saving
-        final_ckpt_dir = config.checkpoint_dir / f"{global_step}"
-        tmp_ckpt_dir = config.checkpoint_dir / f"tmp_{global_step}"
+        lock_path = os.environ.get("PLAW_VLA_SAVE_LOCK", "")
+        if lock_path:
+            import fcntl
 
-        # Remove any existing temp directory and create new one
-        if tmp_ckpt_dir.exists():
-            shutil.rmtree(tmp_ckpt_dir)
-        tmp_ckpt_dir.mkdir(parents=True, exist_ok=True)
+            pathlib.Path(lock_path).parent.mkdir(parents=True, exist_ok=True)
+            lock_fd = open(lock_path, "w")
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    try:
+        if is_main and should_save:
+            # Create temporary directory for atomic checkpoint saving
+            final_ckpt_dir = config.checkpoint_dir / f"{global_step}"
+            tmp_ckpt_dir = config.checkpoint_dir / f"tmp_{global_step}"
 
-        # Save model state using safetensors (handle shared tensors)
-        model_to_save = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
-        safetensors.torch.save_model(model_to_save, tmp_ckpt_dir / "model.safetensors")
+            # Remove any existing temp directory and create new one
+            if tmp_ckpt_dir.exists():
+                shutil.rmtree(tmp_ckpt_dir)
+            tmp_ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-        # Save optimizer state using PyTorch format
-        torch.save(optimizer.state_dict(), tmp_ckpt_dir / "optimizer.pt")
+            # Save model state using safetensors (handle shared tensors)
+            model_to_save = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
+            safetensors.torch.save_model(model_to_save, tmp_ckpt_dir / "model.safetensors")
 
-        # Save training metadata (avoid saving full config to prevent JAX/Flax compatibility issues)
-        metadata = {
-            "global_step": global_step,
-            "config": dataclasses.asdict(config),
-            "timestamp": time.time(),
-        }
-        torch.save(metadata, tmp_ckpt_dir / "metadata.pt")
+            # Save optimizer state using PyTorch format
+            torch.save(optimizer.state_dict(), tmp_ckpt_dir / "optimizer.pt")
 
-        # save norm stats
-        _checkpoints.save_data_configs_assets(
-            tmp_ckpt_dir / "assets",
-            data_loader.data_configs(),
-            data_loader.checkpoint_asset_metadata(),
-        )
+            # Save training metadata (avoid saving full config to prevent JAX/Flax compatibility issues)
+            metadata = {
+                "global_step": global_step,
+                "config": dataclasses.asdict(config),
+                "timestamp": time.time(),
+            }
+            torch.save(metadata, tmp_ckpt_dir / "metadata.pt")
 
-        # Atomically move temp directory to final location
-        if final_ckpt_dir.exists():
-            shutil.rmtree(final_ckpt_dir)
-        tmp_ckpt_dir.rename(final_ckpt_dir)
+            # save norm stats
+            _checkpoints.save_data_configs_assets(
+                tmp_ckpt_dir / "assets",
+                data_loader.data_configs(),
+                data_loader.checkpoint_asset_metadata(),
+            )
 
-        logging.info(f"Saved checkpoint at step {global_step} -> {final_ckpt_dir}")
+            # Atomically move temp directory to final location
+            if final_ckpt_dir.exists():
+                shutil.rmtree(final_ckpt_dir)
+            tmp_ckpt_dir.rename(final_ckpt_dir)
 
-        # Log checkpoint to wandb
-        if config.wandb_enabled:
-            wandb.log({"checkpoint_step": global_step}, step=global_step)
+            # DCU addition: evict page cache before returning (see docstring).
+            _evict_checkpoint_page_cache(final_ckpt_dir)
+            settle_sec = float(os.environ.get("PLAW_VLA_SAVE_SETTLE_SEC", "0"))
+            if settle_sec > 0:
+                time.sleep(settle_sec)
+
+            logging.info(f"Saved checkpoint at step {global_step} -> {final_ckpt_dir}")
+
+            # Log checkpoint to wandb
+            if config.wandb_enabled:
+                wandb.log({"checkpoint_step": global_step}, step=global_step)
+    finally:
+        if lock_fd is not None:
+            lock_fd.close()
 
     if should_save and dist.is_available() and dist.is_initialized():
         dist.barrier()
@@ -493,21 +541,31 @@ def _checkpoint_tensor_into_target(saved: torch.Tensor, target: torch.Tensor) ->
 
 
 def _load_pytorch_weights(model: torch.nn.Module, model_path: str) -> None:
-    """Load a checkpoint, expanding tensors that grew along their leading dimensions."""
-    saved_state = safetensors.torch.load_file(model_path)
+    """Load a checkpoint, expanding tensors that grew along their leading dimensions.
+
+    DCU addition: stream tensor-by-tensor via ``safe_open`` instead of
+    ``load_file``. The eager path materializes the whole ~8GB state dict on
+    the host, which counts against this box's 32GiB cgroup memory wall (and
+    once per DDP rank); streaming keeps the host footprint at the largest
+    single tensor. Tensors are placed on the target parameter's device so
+    ``load_state_dict`` copies device-to-device.
+    """
     target_state = model.state_dict()
     loadable: dict[str, torch.Tensor] = {}
-    for key, saved in saved_state.items():
-        target = target_state.get(key)
-        if target is None:
-            continue
-        fitted = _checkpoint_tensor_into_target(saved, target)
-        if fitted is None:
-            logging.warning("Skipping %s: checkpoint shape %s does not fit target shape %s", key, tuple(saved.shape), tuple(target.shape))
-            continue
-        if tuple(saved.shape) != tuple(target.shape):
-            logging.info("Expanded %s from %s to %s", key, tuple(saved.shape), tuple(target.shape))
-        loadable[key] = fitted
+    with safetensors.safe_open(model_path, framework="pt", device="cpu") as checkpoint_file:
+        for key in checkpoint_file.keys():
+            target = target_state.get(key)
+            if target is None:
+                continue
+            saved = checkpoint_file.get_tensor(key)
+            fitted = _checkpoint_tensor_into_target(saved, target)
+            if fitted is None:
+                logging.warning("Skipping %s: checkpoint shape %s does not fit target shape %s", key, tuple(saved.shape), tuple(target.shape))
+                continue
+            if tuple(saved.shape) != tuple(target.shape):
+                logging.info("Expanded %s from %s to %s", key, tuple(saved.shape), tuple(target.shape))
+            loadable[key] = fitted.to(device=target.device, non_blocking=False)
+            del saved, fitted
     model.load_state_dict(loadable, strict=False)
 
 
@@ -696,6 +754,13 @@ def train_loop(config: _config.TrainConfig):
     if fused_adamw and "fused" not in torch.optim.AdamW.__init__.__code__.co_varnames:
         logging.warning("Requested fused AdamW, but this PyTorch build does not support it; falling back.")
         fused_adamw = False
+    # DCU addition: foreach=True allocates a full extra transient gradient
+    # buffer (~+12GB on a 4B model). On 64GB DCUs that transient OOMs the
+    # card; PLAW_VLA_ADAMW_FOREACH=0 (the default here) pins the slow path.
+    foreach_adamw = os.environ.get("PLAW_VLA_ADAMW_FOREACH", "0") == "1"
+    if getattr(config.optimizer, "fused", False):
+        # fused implies its own single-tensor path; never combine with foreach.
+        foreach_adamw = False
     optim = torch.optim.AdamW(
         model.parameters(),
         lr=peak_lr,
@@ -703,6 +768,7 @@ def train_loop(config: _config.TrainConfig):
         eps=config.optimizer.eps,
         weight_decay=config.optimizer.weight_decay,
         fused=fused_adamw,
+        foreach=foreach_adamw,
     )
 
     # Load checkpoint if resuming
@@ -754,6 +820,18 @@ def train_loop(config: _config.TrainConfig):
         else None
     )
 
+    # DCU addition: gradient accumulation. One optimizer step consumes
+    # `grad_accum` loader batches; only the last micro-batch syncs DDP grads
+    # and applies the optimizer. Default 1 reproduces the original loop.
+    grad_accum = max(1, int(getattr(config, "grad_accum_steps", 1)))
+    if is_main and grad_accum > 1:
+        logging.info(
+            "Gradient accumulation: %d micro-batches per optimizer step (effective batch=%d)",
+            grad_accum,
+            config.batch_size * grad_accum,
+        )
+    micro_step_in_step = 0
+
     while global_step < config.num_train_steps:
         # The loader iterator is infinite and advances its own sampler epoch
         # after every dataset pass. This call only sets the first pass, so a
@@ -766,20 +844,30 @@ def train_loop(config: _config.TrainConfig):
             if global_step >= config.num_train_steps:
                 break
 
-            observation = jax.tree.map(
-                lambda x: x.to(device, non_blocking=True) if isinstance(x, torch.Tensor) else x,
-                observation,
-            )  # noqa: PLW2901
-            if actions is not None:
-                actions = actions.to(device=device, dtype=torch.float32, non_blocking=True)  # noqa: PLW2901
+            is_last_micro = (micro_step_in_step + 1) % grad_accum == 0
+            if micro_step_in_step == 0:
+                # Update LR once per optimizer step
+                for pg in optim.param_groups:
+                    pg["lr"] = lr_schedule(global_step)
 
-            # Update LR
-            for pg in optim.param_groups:
-                pg["lr"] = lr_schedule(global_step)
+            # Skip DDP gradient allreduce on non-final micro-batches
+            sync_context = (
+                model.no_sync()
+                if (use_ddp and not is_last_micro and isinstance(model, torch.nn.parallel.DistributedDataParallel))
+                else contextlib.nullcontext()
+            )
 
-            # Forward pass
-            metrics = {}
-            model_out = model(observation, actions)
+            with sync_context:
+                observation = jax.tree.map(
+                    lambda x: x.to(device, non_blocking=True) if isinstance(x, torch.Tensor) else x,
+                    observation,
+                )  # noqa: PLW2901
+                if actions is not None:
+                    actions = actions.to(device=device, dtype=torch.float32, non_blocking=True)  # noqa: PLW2901
+
+                # Forward pass
+                metrics = {}
+                model_out = model(observation, actions)
 
             # New format: (loss_tensor, metrics_dict)
             if isinstance(model_out, tuple) and len(model_out) == 2 and isinstance(model_out[1], dict):
@@ -799,12 +887,19 @@ def train_loop(config: _config.TrainConfig):
 
             loss = losses.mean()
 
-            # Backward pass
-            loss.backward()
+            # Backward pass (DCU addition: scale by 1/accum so the accumulated
+            # gradient matches a single large batch)
+            (loss / grad_accum).backward()
 
             # Log memory usage after backward pass
             if global_step < 5 and is_main and torch.cuda.is_available():
                 log_memory_usage(device, global_step, "after_backward")
+
+            if not is_last_micro:
+                micro_step_in_step += 1
+                continue
+
+            # --- optimizer step boundary (last micro-batch) ---
 
             # Gradient clipping
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=config.optimizer.clip_gradient_norm)
@@ -855,6 +950,7 @@ def train_loop(config: _config.TrainConfig):
                 infos = []  # Reset stats collection
 
             global_step += 1
+            micro_step_in_step = 0
             # Save checkpoint using the new mechanism
             save_checkpoint(model, optim, global_step, config, is_main, loader)
 

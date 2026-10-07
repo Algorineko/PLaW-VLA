@@ -982,6 +982,10 @@ class TrainConfig:
     num_workers: int = 2
     # Number of train steps (batches) to run.
     num_train_steps: int = 30_000
+    # Gradient accumulation micro-batches per optimizer step. The effective
+    # batch size is batch_size * grad_accum_steps; 1 (default) disables
+    # accumulation entirely and keeps the original loop behavior.
+    grad_accum_steps: int = 1
 
     # How often (in steps) to log training metrics.
     log_interval: int = 100

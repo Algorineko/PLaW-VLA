@@ -327,8 +327,14 @@ class PI0Pytorch(nn.Module):
 
         torch.set_float32_matmul_precision("high")
         compile_mode = os.environ.get("PLAW_VLA_TORCH_COMPILE_MODE", "max-autotune")
-        logging.info("Compiling PI0Pytorch.sample_actions with torch.compile(mode=%s)", compile_mode)
-        self.sample_actions = torch.compile(self.sample_actions, mode=compile_mode)
+        # DCU addition: the env var doubles as a kill switch. Upstream passed the
+        # value straight to torch.compile(mode=...), so any "off"-ish value
+        # raised "Unrecognized mode" — there was no way to disable compilation.
+        if compile_mode.strip().lower() in {"", "0", "off", "none", "disable", "disabled", "false"}:
+            logging.info("torch.compile disabled via PLAW_VLA_TORCH_COMPILE_MODE=%r", compile_mode)
+        else:
+            logging.info("Compiling PI0Pytorch.sample_actions with torch.compile(mode=%s)", compile_mode)
+            self.sample_actions = torch.compile(self.sample_actions, mode=compile_mode)
 
         # Initialize gradient checkpointing flag
         self.gradient_checkpointing_enabled = False
