@@ -58,6 +58,12 @@ class Pi0Config(_model.BaseModelConfig):
     # Optional inference-time future slot count for the world-model branch. When unset,
     # the PyTorch model infers the count from observation metadata if available.
     wm_inference_num_future_frames: int | None = None
+    # Joint loss weight for the world-model predictive loss (PyTorch trainer).
+    wm_loss_weight: float = 0.1
+    # Torch device the PyTorch model is constructed on. Injected by the PyTorch
+    # trainer / policy loader at runtime (`object.__setattr__` on this frozen
+    # dataclass); declared here so readers can rely on the attribute existing.
+    device: str | None = None
 
     def __post_init__(self):
         if self.max_token_len is None:

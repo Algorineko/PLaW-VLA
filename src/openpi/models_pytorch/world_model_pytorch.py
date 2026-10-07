@@ -2,6 +2,7 @@
 
 import logging
 import pathlib
+import types
 from typing import NamedTuple
 
 from huggingface_hub import hf_hub_download
@@ -40,6 +41,55 @@ class WorldModelFutureSlotBatch(NamedTuple):
     wm_target_mask: Tensor  # [B, L_future] bool, token-level loss mask
     l_hist: int
     future_token_loss_normalizer: int  # original future token count before training-time sampling
+
+
+class _DummyVjepa2ModelConfig:
+    """Minimal stand-in for a HF model config, shaped like V-JEPA2's."""
+
+    def __init__(self, hidden_size: int, crop_size: int, patch_size: int, tubelet_size: int):
+        self.hidden_size = hidden_size
+        self.crop_size = crop_size
+        self.patch_size = patch_size
+        self.tubelet_size = tubelet_size
+        self._name_or_path = "dummy-256"
+
+
+class _DummyVjepa2Model(nn.Module):
+    """Tiny random encoder used by the `dummy-256` variant for CPU smoke tests.
+
+    Emits `num_temporal_bins * spatial_tokens_per_bin` tokens per video so the
+    downstream temporal->token mask expansion stays consistent with a real
+    V-JEPA2 forward. Not a quality model — shapes and dtypes only.
+    """
+
+    def __init__(self, hidden_size: int, crop_size: int, patch_size: int, tubelet_size: int):
+        super().__init__()
+        self.config = _DummyVjepa2ModelConfig(hidden_size, crop_size, patch_size, tubelet_size)
+        self.proj = nn.Linear(3, hidden_size)
+
+    def forward(self, pixel_values, **kwargs):  # noqa: ANN001, ANN003 - mirrors HF signature
+        # pixel_values: (B, C, T, H, W) float
+        shape = pixel_values.shape
+        batch, _channels, frames = shape[0], shape[1], shape[2]
+        bins = max(1, frames // self.config.tubelet_size)
+        pooled = pixel_values.float().mean(dim=(3, 4))  # (B, C, T)
+        pooled = pooled.permute(0, 2, 1)  # (B, T, C)
+        # Average frames within each temporal bin.
+        pooled = pooled[:, : bins * self.config.tubelet_size]
+        pooled = pooled.reshape(batch, bins, self.config.tubelet_size, pooled.shape[-1]).mean(dim=2)
+        hidden = self.proj(pooled)  # (B, bins, hidden)
+        spatial_tokens = (self.config.crop_size // self.config.patch_size) ** 2
+        hidden = hidden.repeat_interleave(spatial_tokens, dim=1)  # (B, bins*spatial, hidden)
+        return types.SimpleNamespace(last_hidden_state=hidden)
+
+
+class _DummyVjepa2Processor:
+    """Minimal stand-in for VJEPA2VideoProcessor: list[(T,H,W,C) uint8] -> dict."""
+
+    def __call__(self, videos, return_tensors=None, **kwargs):  # noqa: ANN001, ANN003
+        frames = torch.stack([torch.as_tensor(video) for video in videos])  # (B, T, H, W, C)
+        frames = frames.permute(0, 4, 1, 2, 3).float() / 255.0  # (B, C, T, H, W)
+        return {"pixel_values": frames}
 
 
 class VJepa2Adapter(nn.Module):
@@ -93,6 +143,39 @@ class VJepa2Adapter(nn.Module):
             raise ValueError("VJepa2Adapter requires an explicit model_name.")
         self.model_name = model_name
         self.device = torch.device(device)
+        if model_name == "dummy-256":
+            # Debug sentinel: tiny random stub encoder, no HF download, no CUDA requirement.
+            logging.warning("VJepa2Adapter: using dummy-256 stub encoder (debug only, random weights).")
+            self._vjepa2_model = _DummyVjepa2Model(
+                hidden_size=64,
+                crop_size=256,
+                patch_size=16,
+                tubelet_size=2,
+            ).to(self.device)
+            self._vjepa2_processor = _DummyVjepa2Processor()
+            self.embedding_dim = int(self._vjepa2_model.config.hidden_size)
+            self.enable_input_projector = bool(enable_input_projector)
+            if self.enable_input_projector:
+                if expected_embedding_dim is None:
+                    raise ValueError(
+                        "enable_input_projector=True requires an explicit expected_embedding_dim "
+                        "(the downstream world-model expert width)."
+                    )
+                self.output_dim = int(expected_embedding_dim)
+                self.input_projector = self._build_projector(
+                    in_dim=self.embedding_dim,
+                    out_dim=self.output_dim,
+                    hidden_dim=input_projector_hidden_dim,
+                ).to(self.device)
+            else:
+                if expected_embedding_dim is not None and expected_embedding_dim != self.embedding_dim:
+                    raise ValueError(
+                        f"dummy-256 hidden size ({self.embedding_dim}) does not match the expected "
+                        f"width ({expected_embedding_dim})."
+                    )
+                self.output_dim = self.embedding_dim
+                self.input_projector = None
+            return
         if self.device.type != "cuda":
             raise RuntimeError(f"VJepa2Adapter requires CUDA device, got {self.device}")
         if not torch.cuda.is_available():

@@ -876,9 +876,35 @@ def train_loop(config: _config.TrainConfig):
     cleanup_ddp()
 
 
+def _warn_ignored_settings(config) -> None:
+    """Warn about TrainConfig fields the PyTorch trainer does not implement.
+
+    The PyTorch path freezes layers via `set_training_stage` and has no EMA;
+    `freeze_filter` / `weight_loader` / `ema_decay` are JAX-era fields that are
+    silently ignored here. Loud is better than silent.
+    """
+    if getattr(config, "ema_decay", None) not in (None, 0, 0.0):
+        logging.warning(
+            "TrainConfig.ema_decay=%s is not supported by the PyTorch trainer and will be ignored.",
+            config.ema_decay,
+        )
+    if getattr(config, "weight_loader", None) is not None and type(config.weight_loader).__name__ != "NoOpWeightLoader":
+        logging.warning(
+            "TrainConfig.weight_loader=%s is not applied by the PyTorch trainer and will be ignored "
+            "(weights are loaded from --pytorch_weight_path instead).",
+            type(config.weight_loader).__name__,
+        )
+    if getattr(config, "freeze_filter", None) is not None and getattr(config.freeze_filter, "__len__", None) != 0:
+        logging.warning(
+            "TrainConfig.freeze_filter is not applied by the PyTorch trainer; freezing is controlled "
+            "by training_stage (set_training_stage)."
+        )
+
+
 def main():
     init_logging(logging_level=logging.INFO)
     config = _config.cli()
+    _warn_ignored_settings(config)
     train_loop(config)
 
 

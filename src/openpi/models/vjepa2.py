@@ -5,7 +5,7 @@ from __future__ import annotations
 import dataclasses
 from typing import Literal
 
-Variant = Literal["vitl-256", "vith-256", "vitg-256", "vitg-384"]
+Variant = Literal["vitl-256", "vith-256", "vitg-256", "vitg-384", "dummy-256"]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -22,6 +22,20 @@ class Config:
 
 
 _VARIANTS: dict[Variant, Config] = {
+    # Sentinel used by debug configs: VJepa2Adapter builds a tiny random stub
+    # encoder instead of loading a checkpoint (no HF download, no CUDA needed).
+    # hidden_size=64 matches the `dummy` gemma variant width.
+    "dummy-256": Config(
+        hf_repo_id="dummy-256",
+        crop_size=256,
+        frames_per_clip=64,
+        tubelet_size=2,
+        patch_size=16,
+        hidden_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        mlp_ratio=4.0,
+    ),
     "vitl-256": Config(
         hf_repo_id="facebook/vjepa2-vitl-fpc64-256",
         crop_size=256,

@@ -1270,6 +1270,8 @@ _CONFIGS = [
             paligemma_variant="dummy",
             action_expert_variant="dummy",
             world_model_expert_variant="dummy",
+            enable_world_model=True,
+            vjepa2_variant="dummy-256",
         ),
         data=FakeDataConfig(),
         batch_size=2,
