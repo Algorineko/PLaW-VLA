@@ -671,7 +671,46 @@ def train_loop(config: _config.TrainConfig):
         )
         model_init_thread.start()
     try:
-        model = openpi.models_pytorch.pi0_pytorch.PI0Pytorch(model_cfg).to(device)
+        # DCU addition: construct the model directly in the GPU context at the
+        # training dtype (PLAW_VLA_INIT_ON_DEVICE=1). The default CPU-first
+        # construction peaks at ~16GB host RAM per rank (fp32, 4B params),
+        # which OOM-kills the second DDP rank on this box's 32GiB cgroup wall
+        # before the first step. Loaded weights overwrite every parameter the
+        # checkpoint carries; only freshly-initialized modules (world-model
+        # expert/slots) keep the bf16-rounded random init, which is fine.
+        if os.environ.get("PLAW_VLA_INIT_ON_DEVICE", "0") == "1" and device.type != "cpu":
+            target_dtype = {
+                "bfloat16": torch.bfloat16,
+                "float16": torch.float16,
+                "float32": torch.float32,
+            }.get(model_cfg.dtype, torch.float32)
+            prev_dtype = torch.get_default_dtype()
+            torch.set_default_dtype(target_dtype)
+            try:
+                with torch.device(device):
+                    model = openpi.models_pytorch.pi0_pytorch.PI0Pytorch(model_cfg)
+            finally:
+                torch.set_default_dtype(prev_dtype)
+            # Restore the modules PI0Pytorch deliberately keeps in fp32 (the
+            # action projections / time MLPs feed fp32 activations by design —
+            # see the dtype note in PI0Pytorch.__init__). Under the bf16
+            # default-dtype construction above they would otherwise be born
+            # bf16 and crash on the first fp32 action batch.
+            if target_dtype != torch.float32:
+                for module_name in (
+                    "action_in_proj",
+                    "action_out_proj",
+                    "time_mlp_in",
+                    "time_mlp_out",
+                    "action_time_mlp_in",
+                    "action_time_mlp_out",
+                ):
+                    module = getattr(model, module_name, None)
+                    if module is not None:
+                        module.to(dtype=torch.float32)
+            model = model.to(device)
+        else:
+            model = openpi.models_pytorch.pi0_pytorch.PI0Pytorch(model_cfg).to(device)
     finally:
         model_init_stop.set()
         if model_init_thread is not None:

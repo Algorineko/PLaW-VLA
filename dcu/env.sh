@@ -46,6 +46,7 @@ export WANDB_MODE="${WANDB_MODE:-offline}"
 export PLAW_VLA_TORCH_COMPILE_MODE="${PLAW_VLA_TORCH_COMPILE_MODE:-off}"  # requires dcu-branch patch
 export PLAW_VLA_ADAMW_FOREACH="${PLAW_VLA_ADAMW_FOREACH:-0}"              # foreach transients OOM the 64G card
 export PLAW_VLA_SAVE_LOCK="${PLAW_VLA_SAVE_LOCK:-$PWD/.save_lock}"        # serialize ckpt saves vs the 32G wall
+export PLAW_VLA_INIT_ON_DEVICE="${PLAW_VLA_INIT_ON_DEVICE:-1}"    # GPU-context model init (host 32G wall, runbook B2)
 export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128                      # expandable_segments unsupported on das
 
 # torch extension visibility for distributed runs.
