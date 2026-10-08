@@ -889,12 +889,19 @@ def train_loop(config: _config.TrainConfig):
                 for pg in optim.param_groups:
                     pg["lr"] = lr_schedule(global_step)
 
-            # Skip DDP gradient allreduce on non-final micro-batches
-            sync_context = (
-                model.no_sync()
-                if (use_ddp and not is_last_micro and isinstance(model, torch.nn.parallel.DistributedDataParallel))
-                else contextlib.nullcontext()
+            # Skip DDP gradient allreduce on non-final micro-batches.
+            # PLAW_VLA_ACCUM_NO_SYNC=0 disables this: no_sync combined with
+            # find_unused_parameters (and per-rank random branch dropout)
+            # deadlocked both ranks in futex wait on the DCU box — paying the
+            # extra allreduce per micro-batch is a few percent throughput for
+            # guaranteed-correct reduction semantics.
+            use_no_sync = (
+                os.environ.get("PLAW_VLA_ACCUM_NO_SYNC", "1") == "1"
+                and use_ddp
+                and not is_last_micro
+                and isinstance(model, torch.nn.parallel.DistributedDataParallel)
             )
+            sync_context = model.no_sync() if use_no_sync else contextlib.nullcontext()
 
             with sync_context:
                 observation = jax.tree.map(

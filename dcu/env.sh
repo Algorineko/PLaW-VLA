@@ -54,3 +54,4 @@ export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128                      # expa
 export NUM_GPUS="${NUM_GPUS:-1}"
 
 echo "dcu env ready: python=$PYTHON gpus=$SAFI_GPU venv=$PLAW_VENV"
+export PLAW_VLA_ACCUM_NO_SYNC="${PLAW_VLA_ACCUM_NO_SYNC:-0}"    # no_sync×find_unused 在本机死锁，付 5% 吞吐换正确归约
