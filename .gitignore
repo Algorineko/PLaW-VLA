@@ -175,3 +175,4 @@ cython_debug/
 #codex-files
 .codex
 .codex/
+.save_lock
