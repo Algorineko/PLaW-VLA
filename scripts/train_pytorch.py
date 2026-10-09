@@ -369,6 +369,19 @@ def load_checkpoint(model, optimizer, checkpoint_dir, device):
         logging.info("Loading optimizer state...")
         optimizer_path = ckpt_dir / "optimizer.pt"
 
+        if os.environ.get("PLAW_VLA_RESUME_WEIGHTS_ONLY", "0") == "1":
+            # DCU addition: weights-only hot restart. Two ranks eagerly loading
+            # the ~15GB optimizer.pt (even mmap'd — its page-cache spike counts
+            # against the same cgroup) OOM the 32GiB host wall. AdamW momentum
+            # is discarded and re-warms within a few hundred steps; the LR
+            # schedule is a function of global_step and is unaffected. This is
+            # a documented deviation (runbook hot-restart semantics).
+            logging.warning(
+                "PLAW_VLA_RESUME_WEIGHTS_ONLY=1: skipping optimizer state load "
+                "(AdamW momentum discarded, schedule recomputed from step)."
+            )
+            return latest_step
+
         if optimizer_path.exists():
             optimizer_state_dict = torch.load(optimizer_path, map_location=device, weights_only=False)
             logging.info("Loaded optimizer state from pt format")
@@ -670,6 +683,18 @@ def train_loop(config: _config.TrainConfig):
             daemon=True,
         )
         model_init_thread.start()
+    # DCU addition: serialize the two ranks' model construction. Each rank's
+    # init materializes ~12GB of HF weights on the host (PaliGemma fp32 pull);
+    # overlapping inits breach the 32GiB cgroup wall before training starts.
+    serialize_init = (
+        os.environ.get("PLAW_VLA_SERIALIZE_INIT", "0") == "1"
+        and use_ddp
+        and dist.is_available()
+        and dist.is_initialized()
+    )
+    if serialize_init and dist.get_rank() != 0:
+        logging.info("Rank waiting for rank 0 to finish model init (serialized init).")
+        dist.barrier()
     try:
         # DCU addition: construct the model directly in the GPU context at the
         # training dtype (PLAW_VLA_INIT_ON_DEVICE=1). The default CPU-first
@@ -711,10 +736,19 @@ def train_loop(config: _config.TrainConfig):
             model = model.to(device)
         else:
             model = openpi.models_pytorch.pi0_pytorch.PI0Pytorch(model_cfg).to(device)
+        if serialize_init:
+            logging.info("Rank finished model init (serialized init).")
+            dist.barrier()
     finally:
         model_init_stop.set()
         if model_init_thread is not None:
             model_init_thread.join(timeout=1.0)
+    if serialize_init and dist.get_rank() == 0:
+        # Barrier pairing: r0.post-init <-> r1.pre-init (releases rank 1 to
+        # build its model), then r0.pre-DDP <-> r1.post-init (rank 0 waits
+        # here until rank 1's model exists, so DDP sees identical models).
+        logging.info("Rank 0 waiting for rank 1 model init (serialized init).")
+        dist.barrier()
     if is_main:
         logging.info("Model initialization completed in %.1fs", time.monotonic() - model_init_started)
 

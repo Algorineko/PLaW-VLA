@@ -55,3 +55,5 @@ export NUM_GPUS="${NUM_GPUS:-1}"
 
 echo "dcu env ready: python=$PYTHON gpus=$SAFI_GPU venv=$PLAW_VENV"
 export PLAW_VLA_ACCUM_NO_SYNC="${PLAW_VLA_ACCUM_NO_SYNC:-0}"    # no_sync×find_unused 在本机死锁，付 5% 吞吐换正确归约
+export PLAW_VLA_RESUME_WEIGHTS_ONLY="${PLAW_VLA_RESUME_WEIGHTS_ONLY:-1}"   # resume only loads weights (optimizer.pt eager load hits 32G wall)
+export PLAW_VLA_SERIALIZE_INIT="${PLAW_VLA_SERIALIZE_INIT:-1}"   # serialize 2-rank model init (12GB/rank HF pull on 32G wall)
